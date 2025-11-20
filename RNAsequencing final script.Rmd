@@ -1,0 +1,519 @@
+---
+title: "Project 1: Analysis and interpretation of RNA-Seq data"
+author: "Group1: Brevi Bastien,Pauline Delrée,
+Dominika Sedliaková,Camille Vandeuren"
+date: "2024-11-22"
+output: pdf_document
+fontsize: 11pt
+geometry: a4paper
+---
+\thispagestyle{empty}
+\vspace*{\fill}
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Packages
+```{r, warning=FALSE, message=FALSE}
+library(rWSBIM2122)
+library(tidyverse)
+library(DESeq2)
+library(ggplot2)
+library(ggthemes)
+library(org.Mm.eg.db)
+library(GO.db)
+library(clusterProfiler)
+library(DOSE)
+library(enrichplot)
+library(dplyr)
+library(rmarkdown)
+library(ggVennDiagram)
+```
+
+## Introduction
+In this project, we focus on the differential expression analysis of RNA-Seq data, followed by enrichment analyses to interpret the results in a biological context. The differential expression analysis is carried out using the Bioconductor package DESeq2. The primary goal of this project is to identify genes that are differentially expressed across samples under varying conditions, specifically comparing the effects of genotype (WT vs. KO) and culture conditions (normoxia vs. hypoxia).
+
+\setcounter{page}{1}
+
+## Materials and Methods
+
+The analysis begins with a principal component analysis to explore and identify major sources of variation in the dataset. This is followed by the implementation of a designed interaction model to address the specific biological question.
+For the differential analysis, we are going to work with the DESeq2 package.
+Finally, enrichment analyses (GSEA,ORA) are performed to connect the differentially expressed genes to underlying biological processes, enhancing our understanding of their functional roles and potential implications.
+
+The metadata file provides overall information about the samples used in the RNA-Seq experiments.
+It allows us to specify the experimental design. In our case, we aren't working 
+with human but with mice cells. The experiments were conducted on 12 samples, in two 
+types of genotype: wild-type (wt) and knockout (KO) mice, and under two different conditions assigned as culture in the metadata: normoxia and hypoxia, respectively.
+
+## Results 
+
+1. Creation of count matrix
+```{r, message=FALSE}
+samples <- list.files("data",
+                      pattern = "*tsv.gz",
+                      full.names = TRUE)
+
+counts <- read_tsv(file = samples[1]) %>%
+  select(Geneid, ends_with('.bam'))
+
+for (sample in samples[-1]){
+  tmp <- read_tsv(sample) %>%
+    select(ends_with('.bam'))
+  counts <- cbind(counts, tmp)
+} 
+
+# Sample names are simplified in the "counts" table.
+names(counts) <- sub(pattern = ".bam$", '', names(counts)) 
+names(counts) <- sub(pattern = "../processed_data/bam/", '', names(counts))
+
+# The table "counts" is transformed into a numeric matrix called "mat".
+mat <- as.matrix(counts[, 2:13])
+rownames(mat) <- counts$Geneid
+head(mat)
+
+# metadata = coldata
+metadata <- read_tsv("data/metadata.tsv")
+metadata
+```
+"Samples" contains a vector of file paths to the RNA-Seq count data files.
+"Counts" is a table where rows represent genes and columns correspond to  
+samples. In the next step we will sort the columns in the same order as the samples
+in the metadata.
+
+2. Creation of DESeq dataset :
+```{r, message=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = mat[ ,metadata$sample],
+                              colData = metadata,
+                              design = ~1)
+dds
+```
+"dds" is a DESeq dataset object, ready for further analysis. Using the ~ 1 design formula, we are performing an analysis that helps to visualize sample relationships without assuming any specific experimental design.
+
+
+3. Count distributions in each sample :
+```{r, warning=FALSE}
+as_tibble(assay(dds), rownames = "gene") %>%
+  pivot_longer(names_to = "sample", values_to = "counts", cols = 2:13) %>% 
+  ggplot(aes(x = log2(counts+1), fill = sample)) +
+  geom_histogram(bins = 20) +
+  labs(title= "Counts distribution")+
+  theme(plot.title = element_text(size = 16, face = "bold.italic", 
+                                  hjust = 0.5),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10))+
+  theme(panel.grid.major = element_line(size = 0.5, linetype = 'solid', 
+                                        colour = "grey"),
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"))+
+  facet_wrap(~ sample)
+
+dim(dds)
+```
+We started by visualizing the count distributions for each sample. We observed that most genes have low expression levels, indicated by a high peak around zero in all samples. The distributions across the samples are quite similar, suggesting consistency in the RNA-Seq data. Since the count matrix contains many rows with only zeros, and no statistical analysis can be performed on these genes without variation, we decided to remove these rows from the dds object. Pre-filtering low-count genes before running DESeq2 functions is not obligatory, but we decided to do it to reduce the memory size of the dds object and thereby increase the speed of the analysis.
+```{r, warning=FALSE, message=FALSE}
+dds1 <- dds[rowSums(assay(dds)) > 0, ] 
+dim(dds1)
+```
+It allowed us to reduce the number of genes in the object from 54 532 to 25 470. In other words,
+29 062 genes are not expressed in any of the 12 samples.
+
+4. PCA (Principle Component Analysis) :
+```{r, warning=FALSE, message=FALSE}
+dds2 <- DESeq(dds1)
+
+rld <- rlogTransformation(dds2)
+
+pca_data <- plotPCA(rld, intgroup = c("culture", "genotype"), returnData = TRUE)
+
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+custom_colours <- c("hypoxia" = "red3", "normoxia" = "steelblue3")
+
+ggplot(pca_data, 
+       aes(x = PC1, y = PC2, colour = culture, shape = genotype)) + 
+  geom_point(size = 3,alpha = 0.7)+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))+
+  labs(title= "PCA analysis")+
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold.italic", 
+                                  hjust = 0.5),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10),
+        legend.background = element_rect(fill = "white", colour = "black", 
+                                         size = 0.5, linetype = 'solid'))+
+  scale_color_manual(values = custom_colours)+
+  theme(panel.grid.major = element_line(size = 0.5, linetype = 'solid', 
+                                        colour = "grey"),
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid', 
+                                        colour = "grey"))
+```
+The PCA plot visualizes the variance in the RNA-Seq data across different samples
+and allows us to view the samples in two dimensions. PC1 explains most of the 
+variance in the data (88%) and shows the largest separation primarily driven by 
+the hypoxia condition wt mice. PC2 explains a smaller proportion of the variance
+(8%) and is mainly influenced by the hypoxia condition in KO mice. The samples are
+grouped into four distinct clusters, each representing a specific combination of 
+genotype and culture: cluster 1- normoxic wt mice, cluster 2- normoxic KO mice, 
+cluster 3- hypoxic wt mice, cluster 4- hypoxic KO mice. No outliers are observed,
+and all samples within each condition and genotype group closely together, suggesting consistency within each group. There is a more pronounced separation between wt 
+and KO samples under hypoxia compared to normoxia. This suggests that the differences
+in gene expression between wt and KO mice are more substantial under hypoxic conditions.
+
+Based on our PCA, the most relevant design would include an interaction term, allowing us to test the effect of hypoxia, which differs between the two genotypes. The biological question we aim to address is: **Which genes are differentially affected by hypoxia in the two genotypes—wt and KO mice?** We also considered a paired design, but it does not seem as relevant for this analysis, so we will not present it.
+
+
+5. DESeq2 analysis :
+```{r, warning=FALSE, message=FALSE}
+dds3 <- DESeqDataSetFromMatrix(countData = mat[ ,metadata$sample],
+                              colData = metadata,
+                              design =  ~ culture * genotype)
+
+dds3 <- dds3[rowSums(assay(dds3)) > 0, ]
+
+
+# Set the normoxia level as the reference level
+dds3$culture <- relevel(dds3$culture, ref = "normoxia")
+# Set the wt level as the reference level
+dds3$genotype <- relevel(dds3$genotype, ref = "wt")
+
+dds3 <- DESeq(dds3)
+
+resultsNames(dds3)
+
+sizeFactors(dds3)
+```
+To inspect potential biases in the sequencing data, we extracted size factors. These size factors varied around 1 for all samples, suggesting that the sequencing depth is comparable across different samples.
+
+6. p-values distribution :
+```{r, warning=FALSE}
+res <- results(dds3, name = "culturehypoxia.genotypeKO")
+res_tbl <- as_tibble(res, rownames = "Geneid") %>%
+  arrange(padj)
+
+dim(res_tbl %>% 
+  filter(is.na(padj)))
+
+hist(res_tbl$pvalue)
+
+pic2 <- res_tbl %>%
+  filter(pvalue > 0.85 & pvalue < 0.95) %>%
+  dplyr::select(padj)
+
+nrow(pic2)
+
+summary(pic2)
+
+res_tbl %>%
+    filter(baseMean > metadata(res)$filterThreshold) %>%
+    ggplot(aes(x = pvalue)) +
+geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+ggtitle("Distribution of P-values") +
+labs(x = "P-value", y = "Frequency") +
+geom_vline(aes(xintercept = 0.05), color = "red", linetype = "dashed",
+           size = 1) +
+theme_classic()
+
+```
+There are 11 358 genes with no adjusted p-values. These genes have a very low base mean and were filtered out by the independent filtering procedure.
+
+Examining the filtering threshold for low-count genes, we observe that genes with a base mean lower than 6.511 have been filtered out. This accounts for 44.591% of all tested genes.
+
+On the histogram of p-values, we observe a peak at zero, indicating an enrichment of small p-values. The rest of the histogram appears relatively uniform. However, there is a slightly higher peak around 0.85-0.95. Therefore, we will investigate the behavior of these p-values further.In fact, out of 3 981 genes associated with this range of p-values, 3 228 have no adjusted p-value and were therefore filtered out by the independent filtering. By plotting the histogram of p-values using only the filtered genes (only genes with padjusted value), we observe that the p-values now display a more desirable distribution.
+
+7. Volcano plot and significant genes :
+```{r, warning=FALSE}
+best_genes <- res_tbl %>%
+  filter(!is.na(padj)) %>% 
+  arrange(padj)  %>%
+  head(6)
+
+upregulated <- res_tbl %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05, log2FoldChange > 1) %>%
+  nrow()
+
+downregulated <- res_tbl %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05, log2FoldChange < -1) %>%
+  nrow()
+
+significant_genes <- res_tbl %>%
+  filter(!is.na(padj)) %>%            
+  filter(padj < 0.05,                
+         abs(log2FoldChange) > 1) %>%
+  nrow() 
+
+print(significant_genes)
+
+res_tbl %>%
+  filter(!is.na(padj)) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj),
+             color = padj < 0.05 & abs(log2FoldChange) > 1)) +
+  scale_colour_manual(values = c("gray", "red"),
+                      labels = c("Not significant", "Significant")) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed",
+             color = "blue") +
+  geom_vline(xintercept = c(-1, 1),
+             linetype = "dashed",
+             color = "blue")+
+  labs(x = "Log2 Fold Change",
+       y = "-Log10 Adjusted p-value",
+       color = "Significance")+
+  annotate("text", x = 3, y = 200, label = paste("Upregulated:", 
+                                                 upregulated),
+           hjust = 0.5, color = "green", size = 4) +
+  annotate("text", x = -5, y = 200, label = paste("Downregulated:", 
+                                                  downregulated),
+           hjust = 0.5, color = "red", size = 4)+
+  theme_minimal()+
+  theme(legend.position = "right",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 9),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10)) +
+  ggtitle("Which genes are differentially affected by hypoxia 
+          in the two genotypes?") +
+  theme(legend.position="bottom")+
+  geom_text(data=best_genes[1:4,],aes(label=Geneid),
+            vjust=1.5,hjust = 1, size=3,color="blue") +
+  geom_text(data=best_genes[5,],aes(label=Geneid),
+            vjust=0.5, hjust = 0, size = 3, color = "blue") +
+  geom_text(data=best_genes[6,],aes(label=Geneid),
+            vjust=1.5, hjust = 0, size = 3, color = "blue") +
+  geom_point(data=best_genes,
+             size=1,
+             shape=21,
+             fill="blue",
+             colour="blue")
+```
+We are specifically interested in identifying genes where the effect of hypoxia significantly differs between the two genotypes. Most genes are located near the center of the plot, with log2 fold changes close to zero and large p-values. This suggests that these genes are not significantly affected by hypoxia compared to normoxia, or their response is similar across both genotypes. The significant genes, shown in red, total 969. Among these, 652 genes are downregulated (log2 fold change < -1 and p-value < 0.05) in hypoxia compared to normoxia, while 317 genes are upregulated (log2 fold change > 1 and p-value < 0.05) in hypoxia.
+
+
+8. Inspection of the results and their signification on the best genes :
+```{r, warning=FALSE, message=FALSE}
+as_tibble(counts(dds3[res_tbl$Geneid[1:6], ], normalize = TRUE),
+          rownames = 'Geneid') %>%
+  pivot_longer(names_to = "sample", values_to = "counts", -Geneid) %>%
+  left_join(as_tibble(colData(dds3))) %>%
+  mutate(name = paste0(substr(genotype, 1, 5), '_', culture, '_', 1:3)) %>%
+  ggplot(aes(x = name, y = log(counts), fill = culture)) +
+  geom_bar(stat = 'identity', color = "gray30") +
+  facet_wrap( ~ Geneid, scales = "free") +
+  theme(axis.text.x = element_text(size = 8, angle = 90),
+        axis.title.x = element_blank(),
+        legend.position = "right",
+        legend.text = element_text(size = 7),
+        legend.title = element_text(size = 7))
+```
+All "best genes" are downregulated in our interaction analysis, as shown in the volcano plot. Their log2 fold changes are negative. The barplots illustrate that the hypoxia-induced change in gene expression is less pronounced in the KO genotype compared to WT.
+
+In WT mice, these genes appear upregulated under hypoxia compared to normoxia. In contrast, KO mice show minimal or no change in gene expression between hypoxia and normoxia. This observation aligns with the interaction term used in our linear model: "culturehypoxia.genotypeKO".
+
+In this analysis, we are not only interested in whether genes are up- or downregulated but also in whether the effect of hypoxia differs between the two genotypes. This directly addresses our biological question: Which genes are differentially affected by hypoxia in the two genotypes? Our results suggest that these genes are not affected by hypoxia in the same way in both genotypes.
+
+Thus, the count plots are coherent with the volcano plot. The "downregulation" of the best genes observed in the volcano plot reflects the interaction effect—indicating a reduced effect of hypoxia in the KO genotype compared to WT—rather than the absolute direction of change under hypoxia.
+
+
+9. Enrichment analyses
+
+9.a) GSEA :
+```{r, warning=FALSE, message=FALSE}
+res_tbl<- res_tbl %>% 
+  mutate(gene = AnnotationDbi::mapIds(org.Mm.eg.db, Geneid, "SYMBOL", 
+                                      "ENSEMBL",)) %>% 
+  mutate(ENTREZID = AnnotationDbi::mapIds(org.Mm.eg.db, Geneid, 
+                                          "ENTREZID", "ENSEMBL"))%>%
+  filter(!is.na(ENTREZID),
+         !is.na(padj),
+         !duplicated(ENTREZID)) %>%
+  mutate(ENTREZID = as.character(ENTREZID)) %>% 
+  dplyr::select(Geneid, gene, ENTREZID, everything()) %>% 
+  arrange(padj)
+
+
+ordered_genes <- abs(res_tbl$stat)
+names(ordered_genes) <- res_tbl$ENTREZID
+ordered_genes <- sort(ordered_genes, decreasing = TRUE)
+
+go_gsea <- gseGO(gene = ordered_genes,
+                 OrgDb = org.Mm.eg.db, 
+                 scoreType = "pos") 
+```
+
+Barplot of the top 10 GO terms in GSEA :
+```{r, warning=FALSE}
+
+top_terms1 <- go_gsea@result %>%
+arrange(p.adjust) %>%
+head(10)
+
+ggplot(top_terms1, aes(x = reorder(Description,-p.adjust), y = setSize, 
+                       fill = p.adjust)) +
+geom_bar(stat = "identity") +
+coord_flip() +
+scale_fill_gradient(low = "red", high = "blue") +
+labs(
+title = "Top 10 Enriched GO Terms",
+x = "GO Term",
+y = "Gene Count",
+fill = "Adjusted p-value"
+) +
+theme_minimal()
+
+```
+We can see that regulation of leukocyte activation and regulation of cell activation
+have the two highest "Gene count". Overall, the top 10 enriched GO terms are in the same range of adjusted p-value, between 2,7e-07 and 1,5e-07.
+
+9.b) ORA :
+```{r, warning=FALSE}
+de_genes <- res_tbl$ENTREZID[res_tbl$padj < 0.05 &
+                             abs(res_tbl$log2FoldChange >=1)]
+go_ora <- enrichGO(gene = de_genes,
+                   universe = res_tbl$ENTREZID,
+                   OrgDb = org.Mm.eg.db,
+                   ont = "ALL",
+                   readable = TRUE)
+```
+
+Barplot of the top 10 GO terms in ORA :
+```{r, warning=FALSE}
+barplot(go_ora,
+        showCategory=10,
+        title= "Top GO Enriched terms",
+        order=TRUE)
+```
+Some overlap is observed in GO terms, present in both analyses. However, we don't observe exactly the same terms.
+So we now want to show the overlap between the results of GSEA and ORA.
+
+
+9.c) Visualization of the enrichment analysis: Venn Diagram
+```{r}
+# Extraction of Go terms for significant genes for ORA et GSEA
+ora_genes <- go_ora$ID[go_ora$p.adjust < 0.05]
+gsea_genes <- go_gsea$ID[go_gsea$p.adjust < 0.05]
+
+# Create data for Venn diagram 
+venn_data <- list(
+  ORA = ora_genes,  # Significant genes with ORA
+  GSEA = gsea_genes  # GSignificant genes with GSEA
+)
+
+# Generation of the Venn diagram with custom colors
+ggVennDiagram(venn_data, 
+              label_alpha = 0.4,    
+              label_col = "black",  
+              category.names = c("ORA", "GSEA"),  
+              fill_color = c("skyblue", "yellow"))  
+
+```
+There is only 5% overlap for GSEA and ORA. 29 GO-Terms are shared between the two enrichment analysis. We want to know which ones. GSEA identified higher number of significant terms 509, compared to ORA 48. It could be interesting to study these "shared GO terms" between the two analysis. 
+
+
+10.d) Comparison GO and GSEA results
+We compare the results of GSEA and ORA by identifying:
+
+- Shared GO terms
+
+- ORA and GSEA GO terms individually
+```{r, warning=FALSE}
+go_ora_df <- as.data.frame(go_ora)
+go_gsea_df <- as.data.frame(go_gsea)
+
+go_all <- full_join(go_ora_df %>%
+                   filter(p.adjust < 0.05) %>%
+                   dplyr::select(ID, p.adjust),
+                 go_gsea_df %>%
+                   filter(p.adjust < 0.05) %>%
+                   dplyr::select(ID, p.adjust),
+                 by = c("ID" = "ID"))
+```
+
+
+Shared :
+```{r, message=FALSE}
+na.omit(go_all) %>% 
+  dim()
+
+na.omit(go_all)
+```
+GO:0006261 - DNA-dependent DNA replication
+GO:0140013 - Meiotic cell cycle process
+GO:0006310 - DNA recombination
+GO:0000280 - Nuclear division
+GO:1903046 - Meiotic cell cycle phase transition
+GO:0051321 - Meiotic chromosome segregation
+GO:0006260 - DNA replication
+GO:0006302 - Double-strand break repair
+GO:0007127 - Meiosis I
+GO:0035825 - Homologous recombination
+GO:0061982 - Centrosome cycle
+GO:0007346 - Regulation of mitotic cell cycle
+GO:0045787 - Positive regulation of cell cycle
+GO:0010948 - Negative regulation of cell cycle process
+GO:0045786 - Negative regulation of cell cycle G2/M phase transition
+GO:0000725 - Recombination within heteroduplex DNA
+GO:0048285 - Organelle fission
+GO:0007131 - Reciprocal meiotic recombination
+GO:0140527 - Chromosome organization involved in meiotic cell cycle
+GO:0044786 - Cell cycle DNA replication checkpoint
+GO:0045005 - Maintenance of meiotic sister chromatid cohesion
+GO:0044770 - Cell cycle phase transition
+GO:0000724 - Double-strand break repair via homologous recombination
+GO:0000075 - Cell cycle checkpoint
+GO:0006520 - Cellular amino acid metabolic process
+GO:0044839 - Cell cycle G1/S phase transition
+GO:0007059 - Chromosome segregation
+GO:0007093 - Mitotic cell cycle checkpoint
+
+ORA only :
+```{r, message=FALSE}
+filter(go_all, is.na(p.adjust.y)) %>% 
+  dim()
+```
+
+GSEA only :
+```{r, message=FALSE}
+filter(go_all, is.na(p.adjust.x)) %>% 
+  dim()
+```
+
+
+## Discussion and Conclusion
+In conclusion, the research question addressed through PCA was as follows: **Which genes are differentially affected by hypoxia in the two genotypes—WT and KO mice?**
+
+Our analysis identified 969 significantly differentially expressed genes. By implementing a design with interaction terms, we observed that the hypoxia-induced changes in gene expression were less pronounced in the KO genotype compared to WT mice. These findings suggest that hypoxia affects gene expression differently in the two genotypes.
+
+Furthermore, these results align with the PCA analysis, which showed a more pronounced dispersion between WT and KO samples under hypoxia compared to normoxia.
+
+Following the enrichment analyses, the functions associated with the 26 GO terms listed above, which were shared between the ORA and GSEA analyses, could be influenced by hypoxia.
+
+## Contributions of the team members: 
+All team members contributed collaboratively, with each individual actively involved in all aspects of the project.
+
+## GitHub: 
+Very useful and completely advantageous for this kind of work. However, it wasn’t intuitive to use, and we would have preferred to be more familiar with it.
+
+## Citations
+Laurent Gatto and Axelle Loriot. UCLouvain-CBIO/WSBIM2122: Omics data analysis. https://github.com/UCLouvain-CBIO/WSBIM2122.
+
+Yu G (2023). _enrichplot: Visualization of Functional Enrichment Result_.
+  doi:10.18129/B9.bioc.enrichplot
+  <https://doi.org/10.18129/B9.bioc.enrichplot>, R package version 1.22.0,
+  <https://bioconductor.org/packages/enrichplot>.
+  
+## Session information
+```{r}
+sessionInfo()
+```
+
