@@ -1,7 +1,6 @@
 ---
 title: "Project 1: Analysis and interpretation of RNA-Seq data"
-author: "Group1: Brevi Bastien,Pauline Delrée,
-Dominika Sedliaková,Camille Vandeuren"
+author: "Group1 "
 date: "2024-11-22"
 output: pdf_document
 fontsize: 11pt
@@ -516,4 +515,5 @@ Yu G (2023). _enrichplot: Visualization of Functional Enrichment Result_.
 ```{r}
 sessionInfo()
 ```
+
 
