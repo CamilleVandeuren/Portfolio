@@ -1,0 +1,490 @@
+---
+title: "Omics Data Analysis - Project 2"
+author: "GROUP 2 : Leclerc Marine, Masson Clara, Vandeuren Camille & Schuller Alice"
+date: "2024-12-15"
+output:
+  pdf_document:
+    number_sections: true
+---
+
+\tableofcontents
+
+# PACKAGES
+
+```{r,message = FALSE, warning = FALSE}
+library(readr)
+library(QFeatures)
+library(ggplot2)
+library(tidyverse)
+library(limma)
+library(msdata)
+library(impute)
+library(SummarizedExperiment)
+library(dplyr)
+library("factoextra")
+library("patchwork")
+library("plotly")
+```
+
+
+# INTRODUCTION
+
+This project focuses on the analysis of proteomics data derived from the CPTAC dataset. The goal is to identify and quantify UPS proteins while exploring advanced data processing and statistical methods to ensure reliable and interpretable results. Key steps include imputation, data cleaning, normalization, followed by feature aggregation and statistical analyses to uncover significant trends and patterns. 
+
+Along this report, the aim was to have the most optimized results (the most True Positive and Negative & keeping as much UPS protein as possible)
+
+
+# MATERIALS & METHODS 
+
+In this study, we analyzed proteomics data from the CPTAC dataset, focusing on peptide intensities across 27 experimental conditions. The experimental design included three laboratories and three distinct conditions (A, B, and C), each represented by nine replicates. This setup allowed us to assess variability both within and between conditions and laboratories.
+
+These distinct conditions are composed with a UPS protein mix and digested yeast proteins. It was already known that the concentration of UPS protein increase along the condition where A has the lowest concentration and C have the highest.  
+
+Pre-processing steps involved filtering rows, replacing zeros with NAs, imputation, cleaning data, log-transformation, normalization and aggregation. 
+
+
+# RESULTS
+
+## Exploring the data
+
+We receive a data with 164 columns and we will only kept the columns marked with Intensity, then we create a Summarized Experiment :
+```{r, message = FALSE, warning = FALSE}
+cptac <- read_csv("cptac_coldata.csv")
+
+# Extract Intensity columns
+i <- grep("Intensity\\.", names(read.delim("cptac_a_b_c_peptides.txt"))) 
+
+# Create a SE
+se1 <- readSummarizedExperiment("cptac_a_b_c_peptides.txt",
+                                ecol = i,
+                               fnames = "Sequence",
+                               sep = "\t")
+```
+
+We also keep specific columns in the rowData :
+```{r message=FALSE, warning=FALSE}
+keep_var <- c("Sequence", "Proteins", "Leading.razor.protein", "PEP",
+              "Score", "Reverse", "Potential.contaminant") 
+rowData(se1) <- rowData(se1)[, keep_var]
+```
+
+Before the filtering, we calculate the initial number of UPS proteins in order to see if we lost them a lot during our analysis :
+```{r, message = FALSE, warning = FALSE}
+row_data_tbl <- as_tibble(rowData(se1))
+
+ups_proteins <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE))) %>%
+  distinct(Proteins)  
+ups_protein_count <- nrow(ups_proteins)
+cat("Number of detected UPS proteins before filtering :", ups_protein_count, "\n")
+```
+
+We replace 0 by NA : 
+```{r, message = FALSE, warning = FALSE}
+se1 <- zeroIsNA(se1)  
+
+table(nNA(se1)$nNArow$nNA) 
+```
+
+Based on this table, we decided to filter the data to retain only the rows containing 22 or fewer NAs out of a total of 27 columns :
+```{r, message = FALSE, warning = FALSE}
+se1 <- filterNA(se1, pNA = 22/27)
+
+# Calculate the number of UPS proteins AFTER filtering
+row_data_tbl <- as_tibble(rowData(se1))
+ups_proteins <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE))) %>%
+  distinct(Proteins)  
+ups_protein_count <- nrow(ups_proteins)
+cat("Number of detected UPS proteins after filtering :", ups_protein_count, "\n")
+```
+Why 22 ? It’s because we tested different options with lower or higher value than 22 and we see that it was the most optimize : we have the True Positive/Negative in the volcano plot and it kept a high number of UPS protein (44). 
+
+## Imputation
+
+We tested different imputation techniques such as «zero», «knn» and «QRILC». All these imputations seems to not be successful. So we decide not to impute.   
+
+Interestingly, the methods «knn» doesn’t work at all when the filtering of NA is over 21 because there is more than 80% of missing value and so the imputation can not be done correctly. 
+
+
+## Cleaning data
+
+Now, we want to check if there is reverse sequence and contaminant :
+
+First we are looking at the reverse sequence : 
+```{r, message = FALSE, warning = FALSE}
+table(rowData(se1)$Reverse)
+```
+We can see that there is 15 peptides that are reverse and we need to remove them among the 8770. 
+
+Then we are looking at the contaminant :
+```{r, message = FALSE, warning = FALSE}
+table(rowData(se1)$Potential.contaminant)
+```
+We can see that there is 18 peptides considered as potential contaminant that could be keratine, trypsine or maybe other contaminant and we need to remove them among the 8770. 
+
+Before removing the reverse and the contaminant, we need to create the QFeature data :
+```{r, message = FALSE, warning = FALSE}
+# Create the colData
+colData(se1) 
+se1$condition <- rep(c("6A", "6B", "6C"), each = 9)
+se1$lab <- rep(c("LTQ-Orbitrap_86", "LTQ-OrbitrapO_65", "LTQ-OrbitrapW_56"), each = 3, times = 3)
+head(colData(se1))
+
+# Create the QFeature data
+qf1 <- QFeatures(list(peptides = se1))
+colData(qf1) <- colData(se1)
+```
+
+Now, we can remove the contaminant and the reverse : 
+```{r, message = FALSE, warning = FALSE}
+qf1 <- qf1 %>% 
+  filterFeatures(~ Reverse != "+") %>% 
+  filterFeatures(~ Potential.contaminant != "+")
+```
+
+We want to check if we lost UPS proteins after cleaning the data :
+```{r, message = FALSE, warning = FALSE}
+# Calculate the number of UPS proteins AFTER cleaning the reverse and contaminant 
+row_data_tbl <- as_tibble(rowData(qf1))
+ups_proteins <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE))) %>%
+  distinct(Proteins)  
+ups_protein_count <- nrow(ups_proteins)
+cat("Number of detected UPS proteins after cleaning :", ups_protein_count, "\n")
+```
+We lost 3 UPS proteins. After analysis, we noticed that these UPS proteins came from peptides that were considered to be potential contaminants and were therefore removed.
+
+
+## Transformation and normalization
+
+First we need to look at our Raw Data : 
+```{r, message = FALSE, warning = FALSE, fig.height=3.5}
+boxplot(assay(qf1[[1]]), main = "Raw Data")
+```
+
+We clearly see that we need to log-transform : 
+```{r, message = FALSE, warning = FALSE, fig.height=3.5}
+qf1 <- logTransform(qf1,
+             i = "peptides",
+             name = "log_peptides")
+
+boxplot(assay(qf1[[2]]), main = "Log Transformed Data")
+```
+
+Then we see that we need to normalize : 
+```{r, message = FALSE, warning = FALSE, fig.height=3.5}
+qf1 <- normalize(qf1,
+          i = "log_peptides",
+          name = "lognorm_peptides",
+          method = "diff.median") 
+boxplot(assay(qf1[[3]]), main = "Log Transformed and Normalized Data")
+```
+We tested different approaches for the normalization. In the beginning, we only used "diff.median" and the results seems to be satisfying in the boxplots and through the diverse statistical analysis.
+
+During the presentations, we saw a group using the quantiles as a method for normalization. We tested it, but the results were not significantly different (only the boxplots on the last figure showed a difference). So, we decided to keep our method of normalization.
+
+## Aggregation
+
+We used different methods of aggregation ("colMedians", "robutSummary") but we chose "robustSummary". The RobustSummary method is more robust and suited to noisy data or outliers common in mass spectrometry, unlike colMedians which is simpler but less flexible.
+
+```{r, message = FALSE, warning = FALSE, fig.height=3}
+qf1 <- aggregateFeatures(qf1,
+                  "lognorm_peptides",
+                  name = "proteins",
+                  fcol = "Leading.razor.protein", 
+                  fun = MsCoreUtils ::robustSummary, 
+                  na.rm = TRUE)
+```
+
+
+## Principle Component Analysis
+
+We did a PCA for peptides : 
+```{r, message = FALSE, warning = FALSE, fig.height=3}
+pca_result <- 
+  qf1[["lognorm_peptides"]] %>%
+  filterNA() %>%
+  assay() %>%
+  t() %>%
+  prcomp(scale = TRUE, center = TRUE)
+
+pca_data <- as.data.frame(pca_result$x) 
+pca_data$lab <- colData(qf1)$lab        
+pca_data$condition <- colData(qf1)$condition
+
+pca_means <- pca_data %>%
+  group_by(condition) %>%
+  summarise(PC1_mean = mean(PC1), PC2_mean = mean(PC2))
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = condition, shape = lab)) +
+  geom_point(size = 3) +
+  geom_point(data = pca_means, aes(x = PC1_mean, y = PC2_mean, 
+                                   color = condition), size = 7, shape = 18) + 
+  labs(title = "PCA : Peptides",
+       x = paste0("PC1: ", round(summary(pca_result)$importance[2, 1] * 100, 2), "% variance"),
+       y = paste0("PC2: ", round(summary(pca_result)$importance[2, 2] * 100, 2), "% variance"))
+```
+- PC1 explains 56% of the variance.
+- PC2 explains for 14% of the variance.
+
+
+Then we did another PCA for proteins :
+```{r, message = FALSE, warning = FALSE, fig.height=3}
+pca_result <- 
+  qf1[["proteins"]] %>%
+  filterNA() %>%
+  assay() %>%
+  t() %>%
+  prcomp(scale = TRUE, center = TRUE)
+
+pca_data <- as.data.frame(pca_result$x) 
+pca_data$lab <- colData(qf1)$lab        
+pca_data$condition <- colData(qf1)$condition 
+
+pca_means <- pca_data %>%
+  group_by(condition) %>%
+  summarise(PC1_mean = mean(PC1), PC2_mean = mean(PC2))
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = condition, shape = lab)) +
+  geom_point(size = 3) +
+  geom_point(data = pca_means, aes(x = PC1_mean, y = PC2_mean, 
+                                   color = condition), size = 7, shape = 18) + 
+  labs(title = "PCA : Proteins (RobustSummary aggregation)",
+       x = paste0("PC1: ", round(summary(pca_result)$importance[2, 1] * 100, 2), "% variance"),
+       y = paste0("PC2: ", round(summary(pca_result)$importance[2, 2] * 100, 2), "% variance"))
+
+```
+- PC1 explains 54% of the variance.
+- PC2 explains for 17% of the variance.
+
+Interpretation : 
+The difference between the samples is mostly explained by the 3 different labs. 
+Large dispersion in the samples of the lab at the top left (lab 86) could suggest technical biases or errors.
+The distribution of the labs is spaced out and this can be explained by the batch effect with the differences in the experimental conditions, the samples treated, or factors such as the preparation of the samples or the analytically method used. With this PCA, we know that in a linear model, the labs need to be taken into consideration.
+
+Quality control for labs is needed in order to validate our results :
+```{r, message = FALSE, warning = FALSE}
+#Number of protein UPS by labs 
+ups_proteins_all_labs <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE))) %>%
+  distinct(Proteins)
+
+ups_protein_count_all_labs <- nrow(ups_proteins_all_labs)
+cat("Total number of unique UPS proteins detected across all laboratories :",
+    ups_protein_count_all_labs, "\n")
+
+ups_proteins_lab_86 <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE)) & 
+         colData(se1)$lab == "LTQ-Orbitrap_86") %>%
+  distinct(Proteins)
+
+ups_protein_count_lab_86 <- nrow(ups_proteins_lab_86)
+cat("Total number of unique UPS proteins detected for the LTQ-Orbitrap_86 lab :",
+    ups_protein_count_lab_86, "\n")
+
+ups_proteins_lab_65 <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE)) & 
+         colData(se1)$lab == "LTQ-OrbitrapO_65") %>%
+  distinct(Proteins)
+
+ups_protein_count_lab_65 <- nrow(ups_proteins_lab_65)
+cat("Total number of unique UPS proteins detected for the LTQ-Orbitrap_65 lab :",
+    ups_protein_count_lab_65, "\n")
+
+ups_proteins_lab_56 <- row_data_tbl %>%
+  filter(str_detect(Proteins, regex("ups", ignore_case = TRUE)) & 
+         colData(se1)$lab == "LTQ-OrbitrapW_56") %>%
+  distinct(Proteins)
+
+ups_protein_count_lab_56 <- nrow(ups_proteins_lab_56)
+cat("Total number of unique UPS proteins detected for the LTQ-Orbitrap_56 lab  :",
+    ups_protein_count_lab_56, "\n")
+
+```
+Interpretation : On the basis of the PCAs, we found that there was a scattering of data within Lab 1. We therefore decided to calculate the quantity of protein ups in each of the labs in order to highlight their performance and therefore the quality of the techniques used. We found that there was no lab that was more or less efficient than the others, since they had practically the same quantity of outgoing UPS proteins.
+
+NB: The sum of the numbers of protein ups obtained by each lab does not add up to 44 because duplicates are counted. There are 15 proteins common to all 3 labs and proteins common to batches of two labs. 
+
+
+## Visualization
+```{r, message = FALSE, warning = FALSE, fig.width=10}
+longFormat(qf1["P02787ups", ,
+                 c("lognorm_peptides", "proteins")]) %>%
+    as_tibble() %>%
+    mutate(
+        colname = gsub("^Intensity\\.", "", colname), 
+        condition = case_when( 
+            grepl("A", colname) ~ "A",
+            grepl("B", colname) ~ "B",
+            grepl("C", colname) ~ "C",
+            TRUE ~ "Unknown" ) ) %>%
+    rename(Condition = colname) %>%
+    ggplot(aes(x = Condition, y = value, colour = rowname, shape = condition)) +
+    geom_point(size = 3) +
+    geom_line(aes(group = rowname)) +
+    facet_grid(~ assay) +
+    ggtitle("P02787ups") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+Interpretation: The concentration increases as we move from condition A to B to C, which aligns with our expectations. However, it is notable that concentrations in Lab 1 are consistently lower than those observed in the other two labs. We also observed a fall in concentration of samples 1,2 and 3 maybe due to a high quantity of missing values, probably caused by batch effects. 
+
+We checked if our hypothesis is correct and we calculated the percentage of NA in samples 1,2,3. 
+```{r, message = FALSE, warning = FALSE}
+samples_to_check <- grep("Intensity.6[A-C]_[1-3]", colnames(se1), value = TRUE)
+na_per_sample <- colSums(is.na(assay(se1)[, samples_to_check]))
+percentage_na_per_sample <- (na_per_sample / nrow(se1)) * 100
+cat("Percentage of the missing value for each specific sample:")
+print(percentage_na_per_sample)
+```
+Interpretation : We can see that for the Intensity 6A_1, 6B_1 and 6C_1, the percentage of missing value is constantly higher. Meaning that our hypothesis might be correct.  
+
+
+## Statistical analysis A vs B 
+```{r, message = FALSE, warning = FALSE}
+prots <- qf1[["proteins"]]
+colData(prots) <- colData(qf1)
+
+design <- model.matrix(~ condition + lab, data = colData(prots))
+fit <- lmFit(assay(prots), design)
+
+fit <- eBayes(fit)
+colnames(coefficients(fit)) 
+
+res <-
+    topTable(fit, coef = "condition6B", number = Inf) %>%
+    rownames_to_column("protein") %>%
+    as_tibble() %>%
+    mutate(TP = grepl("ups", protein))
+```
+
+
+## Volcano plot avec A et B 
+```{r, message = FALSE, warning = FALSE, fig.height=3}
+vp <-
+    res %>%
+    ggplot(aes(x = logFC, y = -log10(adj.P.Val))) +
+    geom_point(aes(colour = TP)) +
+    geom_vline(xintercept = c(-1, 1)) +
+    geom_hline(yintercept = -log10(0.05)) +
+    scale_color_manual(values = c("black","red"))
+
+vp
+```
+
+Results of the volcano plot :
+```{r, message = FALSE, warning = FALSE}
+res$predicted_positive <- res$logFC > 1 & res$adj.P.Val < 0.05
+
+TP <- sum(res$predicted_positive & res$TP == TRUE, na.rm = TRUE)  
+TN <- sum(res$predicted_positive == FALSE & res$TP == FALSE, na.rm = TRUE)  
+FP <- sum(res$predicted_positive & res$TP == FALSE, na.rm = TRUE)  
+FN <- sum(res$predicted_positive == FALSE & res$TP == TRUE, na.rm = TRUE)  
+
+
+results_table <- data.frame(
+  "True Positives" = TP,
+  "False Positives" = FP,
+  "True Negatives" = TN,
+  "False Negatives" = FN)
+
+print(results_table)
+```
+The Volcano Plot shows 24 True Positives and 13 False Negative. This indicates that there are 37 UPS proteins, showing a loss of a few compared to the beginning, which had 41. 
+
+However, it is strange to see a red dot on the left that is not accounted for in our table. It is a false positive, yet the number of false positives in our table is listed as 0. You tried to help us during the last class, but without success...
+
+What do we considered as True Positive, False Positive, True Negative and False Negative ?
+
+- True Positive : a red point located in the upper right quadrant.
+
+- False Positive : a black point located in the upper right quadrant or a red point in the upper left quadrant.
+
+- True Negative : a black point located in the three lower quadrants.
+
+- False Negative : a red point located in the three lower quadrants.
+
+
+## Analyse stat avec A et C
+```{r, message = FALSE, warning = FALSE}
+prots <- qf1[["proteins"]]
+colData(prots) <- colData(qf1)
+
+design <- model.matrix(~ condition + lab, data = colData(prots))
+fit <- lmFit(assay(prots), design)
+
+fit <- eBayes(fit)
+colnames(coefficients(fit)) ## cond6B par rapport à A,... 
+
+res <-
+    topTable(fit, coef = "condition6C", number = Inf) %>%
+    rownames_to_column("protein") %>%
+    as_tibble() %>%
+    mutate(TP = grepl("ups", protein))
+```
+
+
+## Volcano plot avec A et C
+```{r, message = FALSE, warning = FALSE, fig.height=3}
+vp <-
+    res %>%
+    ggplot(aes(x = logFC, y = -log10(adj.P.Val))) +
+    geom_point(aes(colour = TP)) +
+    geom_vline(xintercept = c(-1, 1)) +
+    geom_hline(yintercept = -log10(0.05)) +
+    scale_color_manual(values = c("black","red"))
+
+vp
+```
+
+Results of the volcano plot :
+```{r, message = FALSE, warning = FALSE}
+res$predicted_positive <- res$logFC > 1 & res$adj.P.Val < 0.05
+
+TP <- sum(res$predicted_positive & res$TP == TRUE, na.rm = TRUE)  
+TN <- sum(res$predicted_positive == FALSE & res$TP == FALSE, na.rm = TRUE)  
+FP <- sum(res$predicted_positive & res$TP == FALSE, na.rm = TRUE)  
+FN <- sum(res$predicted_positive == FALSE & res$TP == TRUE, na.rm = TRUE)  
+
+
+results_table <- data.frame(
+  "True Positives" = TP,
+  "False Positives" = FP,
+  "True Negatives" = TN,
+  "False Negatives" = FN)
+
+print(results_table)
+```
+The Volcano Plot shows 34 True Positives and 2 False Negative. This indicates that there are 36 UPS proteins, showing a loss of a few compared to the beginning, which had 41.
+
+# CONCLUSION
+
+This study allowed for an in-depth exploration of proteomics data from the CPTAC dataset. The preprocessing steps, including filtering, normalization, and data aggregation, helped reduce technical biases and improve the robustness of the analyses. We effectively identified and quantified UPS proteins, confirming the expected variations in concentration across the different experimental conditions.
+
+Despite challenges related to technical variability between laboratories, the analyses conducted produced consistent results that align with the initial hypotheses.
+
+
+# DISCUSSION
+
+The analysis of proteomics data revealed notable differences in the detection and quantification of UPS proteins across experimental conditions, as well as technical variability between laboratories, particularly in Lab 1. However, this dispersion did not affect the overall conclusions.
+
+Some limitations remain, notably the impact of missing values, which complicates the interpretation of results. Finally, discrepancies in observed concentrations between laboratories could be linked to technical errors or misaligned samples, underscoring the need to improve inter-laboratory harmonization for future studies.
+
+
+# CONTRIBUTION
+Everybody contributed equally.
+
+# FEED-BACK ON GitHub
+We enjoyed working on GitHub. It is always interesting to discover new ways of approaching tasks. However, even though this was our second project and we were careful, we still encountered some merging problems that we did not understand. 
+
+One of our members mentioned another platform where everyone can work together (like Google Docs) and see in real time what others are doing. This way, there are no merging problems, and people don’t accidentally work on the same task without knowing it. It could be interesting to try that method.
+
+
+# SESSION INFO
+```{r, message = FALSE, warning = FALSE}
+sessionInfo()
+```
+
+# APPENDICES
+
