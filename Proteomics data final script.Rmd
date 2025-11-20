@@ -1,6 +1,6 @@
 ---
 title: "Omics Data Analysis - Project 2"
-author: "GROUP 2 : Leclerc Marine, Masson Clara, Vandeuren Camille & Schuller Alice"
+author: "GROUP 2 "
 date: "2024-12-15"
 output:
   pdf_document:
@@ -487,4 +487,5 @@ sessionInfo()
 ```
 
 # APPENDICES
+
 
